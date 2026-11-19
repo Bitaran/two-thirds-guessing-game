@@ -1,0 +1,260 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>2/3 Beauty Contest Game</title>
+<style>
+*{box-sizing:border-box}
+body{margin:0;font-family:Arial,sans-serif;background:#f2f5fb;color:#172033}
+main{max-width:760px;margin:35px auto;padding:20px}
+.card{background:white;border-radius:18px;padding:25px;margin:16px 0;box-shadow:0 5px 20px #17203312}
+h1{font-size:30px;margin:0 0 8px}
+h2{margin-top:0}
+.subtitle{color:#64748b}
+input,button{width:100%;padding:14px;margin:8px 0;border-radius:9px;font-size:16px}
+input{border:1px solid #cbd5e1}
+button{border:0;background:#2457d6;color:white;font-weight:bold;cursor:pointer}
+button.secondary{background:#475569}
+button.danger{background:#b42318}
+button:disabled{opacity:.5;cursor:not-allowed}
+.result{background:#eef4ff;padding:16px;border-radius:12px;margin-top:14px}
+.big{font-size:34px;font-weight:bold;color:#2457d6}
+.status{font-weight:bold}
+.hidden{display:none}
+.small{font-size:13px;color:#64748b}
+table{width:100%;border-collapse:collapse;margin-top:12px}
+td,th{text-align:left;padding:10px;border-bottom:1px solid #e2e8f0}
+</style>
+</head>
+<body>
+<main>
+  <div class="card">
+    <h1>🎯 The 2/3 Beauty Contest</h1>
+    <p class="subtitle">A classroom game about strategic thinking and Nash equilibrium.</p>
+    <p>Choose an integer between 0 and 100. The winning guess is the one closest to two-thirds of the average of everyone's guesses.</p>
+    <p class="small">Submit only once per round. Ties share the win.</p>
+  </div>
+
+  <section id="student" class="card">
+    <h2>Submit your guess</h2>
+    <p class="status" id="roundStatus">Checking game status...</p>
+    <p id="studentMessage" class="small"></p>
+    <form id="guessForm">
+      <label for="studentName">Your name</label>
+      <input id="studentName" maxlength="32" required placeholder="Enter your name">
+      <label for="studentGuess">Your guess (0–100)</label>
+      <input id="studentGuess" type="number" min="0" max="100" step="1" required placeholder="Enter an integer">
+      <button id="submitGuess" type="submit">Submit my guess</button>
+    </form>
+  </section>
+
+  <section class="card">
+    <h2>Instructor controls</h2>
+    <div id="loginArea">
+      <input id="hostPin" type="password" placeholder="Instructor PIN">
+      <button id="loginButton">Instructor login</button>
+    </div>
+    <div id="hostArea" class="hidden">
+      <p class="status">Instructor mode</p>
+      <label for="duration">Round duration (seconds)</label>
+      <input id="duration" type="number" min="15" max="3600" value="120">
+      <button id="startButton">Start new round</button>
+      <button id="stopButton" class="danger">Stop submissions</button>
+      <div id="hostResults" class="result">No results yet.</div>
+      <button id="logoutButton" class="secondary">Log out</button>
+    </div>
+    <p id="hostMessage" class="small"></p>
+  </section>
+
+  <p class="small">Questions? Please ask your instructor.</p>
+</main>
+
+<script>
+const SUPABASE_URL = "https://oggkqxjjhwbwcokmhndc.supabase.co";
+const SUPABASE_KEY = "sb_publishable_6yuxuMJhhEyfXSbdL1zisg_yHylBwRG";
+
+let hostPin = "";
+let isHost = false;
+let currentState = {};
+let poller = null;
+
+async function rpc(name, body = {}) {
+  const response = await fetch(`${SUPABASE_URL}/rest/v1/rpc/${name}`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "apikey": SUPABASE_KEY,
+      "Authorization": `Bearer ${SUPABASE_KEY}`
+    },
+    body: JSON.stringify(body)
+  });
+
+  const data = await response.json().catch(() => null);
+  if (!response.ok) {
+    throw new Error(data?.message || data?.details || "Request failed. Check your connection.");
+  }
+  return data;
+}
+
+function message(id, text) {
+  document.getElementById(id).textContent = text;
+}
+
+function showHostResults(data) {
+  const box = document.getElementById("hostResults");
+  const guesses = data.guesses || [];
+
+  if (!guesses.length) {
+    box.innerHTML = `<strong>Round status:</strong> ${data.status || "No round"}<br>No guesses submitted yet.`;
+    return;
+  }
+
+  const numbers = guesses.map(g => Number(g.guess));
+  const average = numbers.reduce((a,b) => a+b,0) / numbers.length;
+  const target = (2/3) * average;
+  const closestDistance = Math.min(...numbers.map(n => Math.abs(n-target)));
+  const winners = guesses.filter(g => Math.abs(Number(g.guess)-target) < 0.0000001 ||
+    Math.abs(Math.abs(Number(g.guess)-target)-closestDistance) < 0.0000001);
+
+  const winnerIds = new Set(winners.map(w => w.name + "|" + w.guess));
+
+  let html = `
+    <strong>Round status:</strong> ${data.status}<br>
+    <strong>Number of guesses:</strong> ${guesses.length}
+    <div class="result">
+      Average guess: <strong>${average.toFixed(2)}</strong><br>
+      Target (2/3 × average):
+      <div class="big">${target.toFixed(2)}</div>
+      Winning distance: <strong>${closestDistance.toFixed(2)}</strong><br>
+      <strong>Winner${winners.length > 1 ? "s" : ""}:</strong>
+      ${winners.map(w => escapeHtml(w.name) + " (" + w.guess + ")").join(", ")}
+    </div>
+    <table>
+      <thead><tr><th>Student</th><th>Guess</th><th>Distance</th></tr></thead><tbody>`;
+
+  const sorted = [...guesses].sort((a,b) => Number(a.guess)-Number(b.guess));
+  for (const g of sorted) {
+    const distance = Math.abs(Number(g.guess)-target);
+    const winner = winnerIds.has(g.name + "|" + g.guess);
+    html += `<tr>
+      <td>${escapeHtml(g.name)} ${winner ? "🏆" : ""}</td>
+      <td>${g.guess}</td>
+      <td>${distance.toFixed(2)}</td>
+    </tr>`;
+  }
+  html += "</tbody></table>";
+  box.innerHTML = html;
+}
+
+function escapeHtml(value) {
+  return String(value).replace(/[&<>"']/g, c => ({
+    "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;"
+  })[c]);
+}
+
+async function refresh() {
+  try {
+    const state = await rpc("game_public_state");
+    currentState = state || {};
+    const status = currentState.status || "No round started";
+    const count = currentState.count ?? 0;
+
+    message("roundStatus", status === "open" ? "🟢 Round is open" :
+      status === "closed" ? "🔴 Round is closed" : status);
+    message("studentMessage", `${count} guess(es) submitted so far.`);
+
+    const open = status === "open";
+    document.getElementById("studentName").disabled = !open;
+    document.getElementById("studentGuess").disabled = !open;
+    document.getElementById("submitGuess").disabled = !open;
+
+    if (isHost) {
+      const results = await rpc("game_host_results", {p_pin: hostPin});
+      showHostResults(results);
+    }
+  } catch (error) {
+    message("roundStatus", "Unable to connect to the game.");
+    message("studentMessage", error.message);
+  }
+}
+
+document.getElementById("guessForm").addEventListener("submit", async event => {
+  event.preventDefault();
+  const name = document.getElementById("studentName").value.trim();
+  const guessText = document.getElementById("studentGuess").value;
+  const guess = Number(guessText);
+
+  if (!name || !Number.isInteger(guess) || guess < 0 || guess > 100) {
+    message("studentMessage", "Enter your name and an integer from 0 to 100.");
+    return;
+  }
+
+  const button = document.getElementById("submitGuess");
+  button.disabled = true;
+  try {
+    await rpc("game_submit_guess", {p_name:name, p_guess:guess});
+    message("studentMessage", "Your guess has been submitted successfully!");
+    document.getElementById("guessForm").reset();
+    await refresh();
+  } catch (error) {
+    message("studentMessage", error.message);
+    button.disabled = false;
+  }
+});
+
+document.getElementById("loginButton").addEventListener("click", async () => {
+  const pin = document.getElementById("hostPin").value;
+  try {
+    const valid = await rpc("game_host_check", {p_pin:pin});
+    if (!valid) throw new Error("Incorrect instructor PIN.");
+    hostPin = pin;
+    isHost = true;
+    document.getElementById("loginArea").classList.add("hidden");
+    document.getElementById("hostArea").classList.remove("hidden");
+    message("hostMessage", "Instructor login successful.");
+    await refresh();
+  } catch (error) {
+    message("hostMessage", error.message);
+  }
+});
+
+document.getElementById("startButton").addEventListener("click", async () => {
+  const duration = Number(document.getElementById("duration").value);
+  try {
+    await rpc("game_start_round", {
+      p_pin:hostPin,
+      p_duration_seconds:duration
+    });
+    message("hostMessage", "New round started. Students can now submit guesses.");
+    await refresh();
+  } catch (error) {
+    message("hostMessage", error.message);
+  }
+});
+
+document.getElementById("stopButton").addEventListener("click", async () => {
+  try {
+    await rpc("game_stop_round", {p_pin:hostPin});
+    message("hostMessage", "Submissions have been stopped.");
+    await refresh();
+  } catch (error) {
+    message("hostMessage", error.message);
+  }
+});
+
+document.getElementById("logoutButton").addEventListener("click", () => {
+  isHost = false;
+  hostPin = "";
+  document.getElementById("hostArea").classList.add("hidden");
+  document.getElementById("loginArea").classList.remove("hidden");
+  document.getElementById("hostPin").value = "";
+  message("hostMessage", "Logged out.");
+});
+
+refresh();
+poller = setInterval(refresh, 3000);
+</script>
+</body>
+</html>
